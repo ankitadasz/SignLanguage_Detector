@@ -13,6 +13,7 @@ st.title("🤟 Sign Language Communication Dashboard")
 
 # ---------------- MODEL ----------------
 model = pickle.load(open("gesture_model.pkl", "rb"))
+#loads our trained machine learning model from a file so we can use it for prediction
 
 # ---------------- SAFE TTS ----------------
 def create_engine():
@@ -36,6 +37,7 @@ def speak_async(text):
 
 # ---------------- MEDIAPIPE ----------------
 mp_hands = mp.solutions.hands
+#This initializes the hand tracking model which detects hand landmarks from the camera input
 hands = mp_hands.Hands()
 draw = mp.solutions.drawing_utils
 
