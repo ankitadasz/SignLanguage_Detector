@@ -2,7 +2,7 @@ import streamlit as st
 import cv2
 import mediapipe as mp
 import pickle
-import speech_recognition as sr
+import numpy as np
 import time
 import threading
 
@@ -13,7 +13,7 @@ st.title("🤟 Sign Language Communication Dashboard")
 # ---------------- MODEL ----------------
 model = pickle.load(open("gesture_model.pkl", "rb"))
 
-# ---------------- SAFE TTS (CLOUD FRIENDLY) ----------------
+# ---------------- SAFE SPEECH ----------------
 def speak(text):
     try:
         import pyttsx3
@@ -23,7 +23,6 @@ def speak(text):
         engine.runAndWait()
         engine.stop()
     except:
-        # fallback for Streamlit Cloud
         st.toast(f"🔊 {text}")
 
 def speak_async(text):
@@ -31,30 +30,24 @@ def speak_async(text):
 
 # ---------------- MEDIAPIPE ----------------
 mp_hands = mp.solutions.hands
-hands = mp_hands.Hands()
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1)
 draw = mp.solutions.drawing_utils
 
 # ---------------- SESSION STATE ----------------
-if "sentence" not in st.session_state:
-    st.session_state.sentence = []
-
 if "camera_on" not in st.session_state:
     st.session_state.camera_on = False
 
 if "cap" not in st.session_state:
     st.session_state.cap = None
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+if "current_gesture" not in st.session_state:
+    st.session_state.current_gesture = "None"
 
 if "last_spoken" not in st.session_state:
     st.session_state.last_spoken = ""
 
 if "prediction_buffer" not in st.session_state:
     st.session_state.prediction_buffer = []
-
-if "current_gesture" not in st.session_state:
-    st.session_state.current_gesture = ""
 
 # ---------------- MODE ----------------
 mode = st.radio("Select Mode", ["Gesture", "Voice", "Text"])
@@ -68,35 +61,36 @@ if mode == "Gesture":
 
     with col1:
         st.subheader("📷 Live Camera Feed")
-        FRAME_WINDOW = st.empty()
+        frame_window = st.empty()
 
     with col2:
-        if st.button("📷 Start Camera"):
-            st.session_state.camera_on = True
-            st.session_state.cap = cv2.VideoCapture(0)
+        start = st.button("📷 Start Camera")
+        stop = st.button("🛑 Stop Camera")
 
-        if st.button("🛑 Stop Camera"):
-            st.session_state.camera_on = False
-            if st.session_state.cap:
-                st.session_state.cap.release()
-                st.session_state.cap = None
+        gesture_box = st.empty()
+        status_box = st.empty()
 
-        if st.button("➕ Add Gesture"):
-            g = st.session_state.current_gesture
-            if g not in ["None", ""]:
-                if g == "SPACE":
-                    st.session_state.sentence.append(" ")
-                else:
-                    st.session_state.sentence.append(g)
+    # START CAMERA
+    if start:
+        st.session_state.camera_on = True
+        st.session_state.cap = cv2.VideoCapture(0)
 
-        gesture_display = st.empty()
+    # STOP CAMERA
+    if stop:
+        st.session_state.camera_on = False
+        if st.session_state.cap:
+            st.session_state.cap.release()
+            st.session_state.cap = None
 
-    # -------- CAMERA LOOP --------
-    if st.session_state.camera_on:
+    # ---------------- CAMERA PROCESSING (SAFE LOOP) ----------------
+    if st.session_state.camera_on and st.session_state.cap is not None:
 
         cap = st.session_state.cap
 
-        while st.session_state.camera_on:
+        for _ in range(200):  # limited loop (Streamlit-safe)
+
+            if not st.session_state.camera_on:
+                break
 
             ret, frame = cap.read()
             if not ret:
@@ -111,38 +105,50 @@ if mode == "Gesture":
 
             if result.multi_hand_landmarks:
                 for hand in result.multi_hand_landmarks:
+
                     data = []
                     for lm in hand.landmark:
                         data.extend([lm.x, lm.y])
 
-                    prediction = model.predict([data])[0]
-                    draw.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
+                    if len(data) == 42:  # safety check
+                        prediction = model.predict([data])[0]
 
-            # stability filter
+                    draw.draw_landmarks(
+                        frame,
+                        hand,
+                        mp_hands.HAND_CONNECTIONS
+                    )
+
+            # ---------------- STABILITY FILTER ----------------
             st.session_state.prediction_buffer.append(prediction)
+
             if len(st.session_state.prediction_buffer) > 5:
                 st.session_state.prediction_buffer.pop(0)
 
-            stable_prediction = max(
+            stable = max(
                 set(st.session_state.prediction_buffer),
                 key=st.session_state.prediction_buffer.count
             )
 
-            st.session_state.current_gesture = stable_prediction
+            st.session_state.current_gesture = stable
 
-            # speech (safe)
-            if stable_prediction not in ["None", ""]:
-                if stable_prediction != st.session_state.last_spoken:
-                    speak_async(stable_prediction)
-                    st.session_state.last_spoken = stable_prediction
+            # ---------------- SPEECH ----------------
+            if stable not in ["None", ""]:
+                if stable != st.session_state.last_spoken:
+                    speak_async(stable)
+                    st.session_state.last_spoken = stable
 
-            FRAME_WINDOW.image(frame, channels="BGR")
-            gesture_display.metric("Gesture", stable_prediction)
+            # ---------------- UI UPDATE ----------------
+            frame_window.image(frame, channels="BGR")
+            gesture_box.metric("Detected Gesture", stable)
+            status_box.info("Camera Running...")
 
             time.sleep(0.03)
 
+        status_box.warning("Camera Stopped")
+
 # =====================================================
-# ================== VOICE MODE ========================
+# ================== VOICE MODE =======================
 # =====================================================
 elif mode == "Voice":
 
@@ -151,6 +157,8 @@ elif mode == "Voice":
     audio_file = st.file_uploader("Upload WAV file", type=["wav"])
 
     if audio_file:
+        import speech_recognition as sr
+
         recognizer = sr.Recognizer()
 
         try:
@@ -160,7 +168,7 @@ elif mode == "Voice":
             text = recognizer.recognize_google(audio)
             st.success("You said: " + text)
 
-        except Exception as e:
+        except:
             st.error("Speech recognition failed")
 
 # =====================================================
